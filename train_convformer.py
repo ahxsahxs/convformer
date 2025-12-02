@@ -15,7 +15,9 @@ def train_convformer(
     learning_rate=1e-4,
     checkpoint_dir='checkpoints',
     log_dir='logs/convformer',
-    quantiles=[0.1, 0.5, 0.9]
+    quantiles=[0.1, 0.5, 0.9],
+    checkpoint_to_resume=None,
+    initial_epoch=0
 ):
     # Create directories
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -37,38 +39,56 @@ def train_convformer(
         val_dataset = val_generator.get_dataset()
         val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
     
-    # 2. Model
-    print("Creating ConvFormer model...")
-    model = ConvFormer(forecast_horizon=20, quantiles=quantiles)
-    
-    # Build model to print summary
-    # Create dummy input to build the model
-    dummy_input = {
-        'sentinel2': tf.zeros((1, 50, 128, 128, 4)),
-        's2_mask': tf.zeros((1, 50, 128, 128, 1)),
-        'weather': tf.zeros((1, 50, 8)),
-        'dem': tf.zeros((1, 128, 128, 3)),
-        'geomorphology': tf.zeros((1, 128, 128, 1)),
-        'time': tf.zeros((1, 50, 3))
-    }
-    model(dummy_input)
-    model.summary()
-    
-    # 3. Compile
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    loss = CombinedLoss(quantiles=quantiles, veg_weight=0.1)
-    
-    model.compile(optimizer=optimizer, loss=loss)
+    # 2. Model - Either load from checkpoint or create new
+    if checkpoint_to_resume and os.path.exists(checkpoint_to_resume):
+        print(f"Loading model from checkpoint: {checkpoint_to_resume}")
+        # Load the full model including optimizer state
+        model = tf.keras.models.load_model(
+            checkpoint_to_resume,
+            custom_objects={
+                'ConvFormer': ConvFormer,
+                'CombinedLoss': CombinedLoss,
+                'QuantileLoss': QuantileLoss
+            }
+        )
+        print("Model loaded successfully. Resuming training...")
+        model.summary()
+    else:
+        if checkpoint_to_resume:
+            print(f"Warning: Checkpoint {checkpoint_to_resume} not found. Creating new model...")
+        
+        print("Creating ConvFormer model...")
+        model = ConvFormer(forecast_horizon=20, quantiles=quantiles)
+        
+        # Build model to print summary
+        # Create dummy input to build the model
+        dummy_input = {
+            'sentinel2': tf.zeros((1, 50, 128, 128, 4)),
+            's2_mask': tf.zeros((1, 50, 128, 128, 1)),
+            'weather': tf.zeros((1, 50, 8)),
+            'dem': tf.zeros((1, 128, 128, 3)),
+            'geomorphology': tf.zeros((1, 128, 128, 1)),
+            'time': tf.zeros((1, 50, 3))
+        }
+        model(dummy_input)
+        model.summary()
+        
+        # 3. Compile
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        loss = CombinedLoss(quantiles=quantiles, veg_weight=0.1)
+        
+        model.compile(optimizer=optimizer, loss=loss)
     
     # 4. Callbacks
-    checkpoint_path = os.path.join(checkpoint_dir, 'convformer_best.weights.h5')
+    # Save full model (not just weights) to preserve optimizer state
+    checkpoint_path = os.path.join(checkpoint_dir, 'convformer_best.keras')
     
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
             checkpoint_path,
             monitor='loss',
             save_best_only=True,
-            save_weights_only=True,
+            save_weights_only=False,  # Save full model including optimizer
             mode='min',
             verbose=1
         ),
@@ -94,22 +114,23 @@ def train_convformer(
     ]
     
     # 5. Train
-    print("Starting training...")
+    print(f"Starting training from epoch {initial_epoch}...")
     try:
         history = model.fit(
             train_dataset,
             validation_data=val_dataset,
             epochs=epochs,
+            initial_epoch=initial_epoch,
             callbacks=callbacks
         )
     except KeyboardInterrupt:
         print("Training interrupted.")
         return model
     
-    # Save final weights
-    final_weights_path = os.path.join(checkpoint_dir, 'convformer_final.weights.h5')
-    print(f"Saving final weights to {final_weights_path}...")
-    model.save_weights(final_weights_path)
+    # Save final model (full model with optimizer state)
+    final_model_path = os.path.join(checkpoint_dir, 'convformer_final.keras')
+    print(f"Saving final model to {final_model_path}...")
+    model.save(final_model_path)
     
     print("Training complete.")
     return model
@@ -158,6 +179,18 @@ if __name__ == "__main__":
         default='logs/convformer',
         help='Directory for TensorBoard logs'
     )
+    parser.add_argument(
+        '--resume',
+        type=str,
+        default=None,
+        help='Path to checkpoint file to resume training from (e.g., checkpoints/convformer_best.keras)'
+    )
+    parser.add_argument(
+        '--initial-epoch',
+        type=int,
+        default=0,
+        help='Starting epoch number (useful when resuming training)'
+    )
     
     args = parser.parse_args()
     
@@ -171,5 +204,7 @@ if __name__ == "__main__":
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         checkpoint_dir=args.checkpoint_dir,
-        log_dir=args.log_dir
+        log_dir=args.log_dir,
+        checkpoint_to_resume=args.resume,
+        initial_epoch=args.initial_epoch
     )
