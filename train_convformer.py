@@ -2,10 +2,9 @@ import os
 import sys
 import argparse
 import tensorflow as tf
-# Disable GPU to avoid "No DNN in stream executor" error
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 from convformer import ConvFormer, QuantileLoss, CombinedLoss
 from greenearthnet_dataset import GreenEarthNetGenerator
+from tensorflow.keras import backend as K
 
 def train_convformer(
     train_dir,
@@ -30,14 +29,14 @@ def train_convformer(
     train_dataset = generator.get_dataset()
     
     # Shuffle and Batch
-    train_dataset = train_dataset.shuffle(100).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    train_dataset = train_dataset.shuffle(100).batch(batch_size).repeat().prefetch(tf.data.AUTOTUNE)
     
     val_dataset = None
     if val_dir and os.path.exists(val_dir):
         print(f"Loading validation data from {val_dir}...")
         val_generator = GreenEarthNetGenerator(val_dir)
         val_dataset = val_generator.get_dataset()
-        val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        val_dataset = val_dataset.batch(batch_size).repeat().prefetch(tf.data.AUTOTUNE)
     
     # 2. Model - Either load from checkpoint or create new
     if checkpoint_to_resume and os.path.exists(checkpoint_to_resume):
@@ -115,10 +114,23 @@ def train_convformer(
     
     # 5. Train
     print(f"Starting training from epoch {initial_epoch}...")
+    
+    # Calculate steps per epoch
+    steps_per_epoch = max(1, len(generator.files) // batch_size)
+    validation_steps = None
+    if val_dataset is not None and val_dir:
+        validation_steps = max(1, len(val_generator.files) // batch_size)
+    
+    print(f"Steps per epoch: {steps_per_epoch}")
+    if validation_steps:
+        print(f"Validation steps: {validation_steps}")
+    
     try:
         history = model.fit(
             train_dataset,
             validation_data=val_dataset,
+            steps_per_epoch=steps_per_epoch,
+            validation_steps=validation_steps,
             epochs=epochs,
             initial_epoch=initial_epoch,
             callbacks=callbacks
@@ -132,6 +144,9 @@ def train_convformer(
     print(f"Saving final model to {final_model_path}...")
     model.save(final_model_path)
     
+    del model
+    K.clear_session()
+
     print("Training complete.")
     return model
 
